@@ -46,6 +46,10 @@ Postgres: localhost:5433
 pgAdmin: http://localhost:8070
 Mage: http://localhost:6789
 
+Un detalle adicional es que al ingresar en Postgres, el usuario y la contraseña para entrar son las siguientes:
+- Usuario: admin@datamining.com
+- Contraseña: admin
+
 
 # Gestión de secretos (nombres, propósito, rotación, responsables)
 Los valores secretos están guardados en el pipeline con ayuda de Mage UI. Sin embargo, en la arquitectura del proyecto está un archivo de secrets.yml donde se muestra el nombre de los secretos junto a unos valores de referencia.
