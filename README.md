@@ -27,11 +27,16 @@ Postgres (schema raw)
 ## Levantar contenedor de Docker
 La primera parte del proyecto es el levantamiento en Docker para tener Mage, PgAdmin, y Postgres.
 Los tres servicios tendrán un puerto asignado para posteriormente poder trabajar con cada una, como en Mage para el código y la funcionalidad de los pipelines, o realizar validaciones en la base de datos con pgadmin.
-Para levantar el contenedor, se debe ejecutar el siguiente comando en la carpeta donde se tenga el archivo docker-compose.yml:
+Para levantar el contenedor, primero se debe descargar el proyecto desde gihthub con el comando:
+git clone https://github.com/Zark35/Proyecto01-DataMining.git
+
+Dentro del proyecto, ir a la carpeta de Proyecto completo original, en la carpeta Proyecto 1, y ahí abrir una consola de comando. Este proceso también se puede hacer en la consola para llegar hasta la carpeta Proyecto 1. En la consola, se debe ejecutar el siguiente comando para ejecutar el archivo docker-compose.yml:
 
 ```bash
 docker compose up -d
 ```
+
+Una vez finalizado, se puede acceder a los diferentes servicios.
 
 Servicios (con su respectivo puerto):
 Postgres: localhost:5433
