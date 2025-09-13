@@ -6,6 +6,8 @@ El proyecto se enfoca en implementar un pipeline que extráe datos desde la API 
 Los datos son segmentados y posteriormente cargados en la capa **raw** de Postgres, para completa trazabilidad.
 
 La arquitectura del proyecto es la siguiente:
+
+```text
 QuickBooks API
      │
      ▼
@@ -21,6 +23,7 @@ QuickBooks API
      │
      ▼
 Postgres (schema raw)
+```
  
 
 # Pasos para levantar contenedores y configurar el proyecto
