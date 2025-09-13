@@ -67,7 +67,7 @@ El propósito y nombre de los secretos son los siguientes:
 | pg_port          | Puerto de Postgres                 |
 | pg_db            | Base de datos destino              |
 
-Los cuatro primeros secretos corresponden a los necesarios para trabajar con la Api. Asimismo, el Refresh Token es fundamental para el proceso de OAuth 2.0 y obtener el Acces Token al inicio de cada ejecución/tramo. A pesar de que el Refresh Token recide en los Secrets, al momento de emplearlo se debe actualizar con los valores que se devuelve al obtener el access token. Por esta razón, el código también refresca la variable de Refresh Token para evitar errores de ejecución.
+Los cuatro primeros secretos corresponden a los necesarios para trabajar con la Api. Asimismo, el Refresh Token es fundamental para el proceso de OAuth 2.0 y obtener el Acces Token al inicio de cada ejecución/tramo. A pesar de que el Refresh Token recide en los Secrets, al momento de emplearlo se debe actualizar con los valores que se devuelve al obtener el access token. Por esta razón, el código también refresca la variable de Refresh Token para evitar errores de ejecución. Sin embargo, el refresh_token puede llegar a caducar y, de ser necesario, ser reemplazado manualmente para evitar problemas al ejecutar un día diferente.
 Los últimos cinco secretos son para las credenciales de Postgres.
 De esta forma, todos los tokens/lleaves de QBO y las credencias de Postgres están seguras.
 
@@ -174,7 +174,7 @@ WHERE d.fecha IS NULL;
 
 
 # Troubleshooting
-- **Auth fallida (401/403):** Refrescar `qb_refresh_token` en Secrets.
+- **Auth fallida (401/403):** Refrescar `qb_refresh_token` en Secrets manualmente.
 - **DNS errors:** Forzar DNS en `docker-compose.yaml` (`8.8.8.8`).
 - **Rate limits:** Revisar logs de reintentos con backoff.
 - **Timezones:** Siempre usar UTC en parámetros; equivalencias documentadas en README.
