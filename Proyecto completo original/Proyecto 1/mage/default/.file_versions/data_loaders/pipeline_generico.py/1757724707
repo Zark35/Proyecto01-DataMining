@@ -1,0 +1,165 @@
+# Importación de librerías a utilizar
+import requests
+import json
+import time
+import random
+from sqlalchemy import create_engine, text
+from mage_ai.data_preparation.shared.secrets import get_secret_value
+from datetime import datetime, timedelta
+
+# ifs obtenidos de la clase para funcionalidad del método data_loader al final
+if 'data_loader' not in globals():
+    from mage_ai.data_preparation.decorators import data_loader
+if 'test' not in globals():
+    from mage_ai.data_preparation.decorators import test
+
+# Varios de los métodos se basan en los vistos en clase
+# Asimismo, algunos cambios y mejoras para cumplir todos los literales del proyecto se realizaron con una investigación en otras páginas
+# y con ayuda de ChatGPT como una herramienta guía
+def refresh_access_token():
+    client_id = get_secret_value('qb_client_id')
+    client_secret = get_secret_value('qb_client_secret')
+    refresh_token = get_secret_value('qb_refresh_token')
+
+    url = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"
+    headers = {
+        "Accept": "application/json", 
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    auth = (client_id, client_secret)
+    data = {
+        "grant_type": "refresh_token", 
+        "refresh_token": refresh_token
+    }
+
+    resp = requests.post(url, headers=headers, data=data, auth=auth, timeout=30)
+    #print(resp.status_code, resp.text)
+    resp.raise_for_status()
+    tokens = resp.json()
+
+    new_refresh = tokens["refresh_token"]
+    new_access = tokens["access_token"]
+
+    print("Nuevo refresh_token:", new_refresh)
+
+    return new_access
+
+def _fetch_qb_data(realm_id, access_token, entidad, query, base_url, minor_version,
+                   page_size=1000, max_retries=5):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Accept': 'application/json',
+        'Content-Type': 'text/plain'
+    }
+
+    all_records = []
+    start_position = 1
+    page = 1
+    has_more = True
+    request_payloads = []
+
+    while has_more:
+        paged_query = f"{query} STARTPOSITION {start_position} MAXRESULTS {page_size}"
+        params = {"query": paged_query, "minorversion": minor_version}
+        url = f"{base_url.rstrip('/')}/v3/company/{realm_id}/query"
+
+        # Guardar request payload (SIN Authorization)
+        request_payloads.append({
+            "url": url,
+            "headers": {k: v for k, v in headers.items() if k.lower() != "authorization"},
+            "params": params
+        })
+
+        for intento in range(max_retries):
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=60)
+                response.raise_for_status()
+                data = response.json()
+
+                records = data.get('QueryResponse', {}).get(entidad, [])
+                all_records.extend(records)
+
+                print(f"✅ Página {page}: {len(records)} registros obtenidos (posición {start_position})")
+                has_more = len(records) == page_size
+                break
+
+            except requests.exceptions.RequestException as e:
+                espera = (2 ** intento) + random.uniform(0, 1)
+                print(f"⚠️ Error en la página {page}: {e}. Reintentando en {espera:.2f}s...")
+                time.sleep(espera)
+
+                if intento == max_retries - 1:
+                    print("❌ Falló después de múltiples intentos, abortando este tramo.")
+                    has_more = False
+                    break
+
+        start_position += page_size
+        page += 1
+
+    return all_records, request_payloads
+
+
+@data_loader
+def load_data_from_api(*args, **kwargs):
+    # Data loader:
+    # - Extrae registros de QuickBooks en tramos (chunking)
+    # Devuelve los registros y el resumen (sin persistir en DB - Eso se hace en el data exporter)
+
+    entidad = kwargs.get('entidad', 'Item') # Invoice, Customer, Item
+    fecha_inicio = kwargs.get('fecha_inicio', '2025-08-01')
+    fecha_fin = kwargs.get('fecha_fin', '2025-08-07')
+
+    realm_id = get_secret_value('qb_realm_id')
+    access_token = refresh_access_token()
+    base_url = 'https://sandbox-quickbooks.api.intuit.com'
+    minor_version = 75
+
+    start = datetime.fromisoformat(fecha_inicio)
+    end = datetime.fromisoformat(fecha_fin)
+
+    all_results = []   # Registros
+    resumen = []       # Métricas - Para el apartado adicional de mostrar un resumen
+
+    chunk_start = start
+    while chunk_start <= end:
+        chunk_end = min(chunk_start + timedelta(days=1), end)
+        if entidad == "Invoice":
+            print("Haciendo como Invoice")
+            query = f"select * from {entidad} where TxnDate >= '{chunk_start.date()}' and TxnDate <= '{chunk_end.date()}'"
+        else:
+            query = f"select * from {entidad}"
+
+        start_time = time.time()
+        records, request_payloads = _fetch_qb_data(
+            realm_id, access_token, entidad, query, base_url, minor_version
+        )
+        duration = round(time.time() - start_time, 2)
+
+        # Acumular los resultados para las tablas
+        all_results.append({
+            "entidad": entidad,
+            "chunk_start": chunk_start,
+            "chunk_end": chunk_end,
+            "records": records,
+            "query": query,
+            "request_payloads": request_payloads
+        })
+
+        resumen.append({
+            "entidad": entidad,
+            "fecha_inicio": chunk_start.isoformat(),
+            "fecha_fin": chunk_end.isoformat(),
+            "filas": len(records),
+            "duracion_seg": duration
+        })
+
+        chunk_start = chunk_end + timedelta(days=1)
+
+    print("📊 Resumen:")
+    for r in resumen:
+        print(r)
+
+    return {
+        "resultados": all_results,
+        "resumen": resumen
+    } 

@@ -1,0 +1,28 @@
+if 'data_exporter' not in globals():
+    from mage_ai.data_preparation.decorators import data_exporter
+
+
+@data_exporter
+def export_data_to_postgres(data, *args, **kwargs):
+    """
+    Data exporter:
+    - Recibe la salida del data_loader
+    - Inserta en Postgres cada chunk con sus metadatos
+    """
+    resultados = data["resultados"]
+
+    for i, chunk in enumerate(resultados, 1):
+        records = chunk["records"]
+        if not records:
+            continue
+
+        _save_raw_to_postgres(
+            records=records,
+            table_name=f"qb_{chunk['entidad'].lower()}s",
+            chunk_start=chunk["chunk_start"],
+            chunk_end=chunk["chunk_end"],
+            query=chunk["query"],
+            page_number=1,
+            page_size=len(records)
+        )
+        print(f"✅ Chunk {i} ({chunk['entidad']}) guardado en Postgres con {len(records)} filas")

@@ -1,0 +1,97 @@
+import requests
+import json
+import time
+import random
+from sqlalchemy import create_engine, text
+from mage_ai.data_preparation.shared.secrets import get_secret_value
+from datetime import datetime, timedelta
+
+if 'data_exporter' not in globals():
+    from mage_ai.data_preparation.decorators import data_exporter
+
+def _save_raw_to_postgres(records, table_name, chunk_start, chunk_end, query, page_number, page_size):
+    """
+    Guarda registros en tabla raw con upsert e incluye metadatos.
+    """
+    user = get_secret_value('pg_user')
+    password = get_secret_value('pg_password')
+    host = get_secret_value('pg_host')
+    port = get_secret_value('pg_port')
+    db = get_secret_value('pg_db')
+
+    url_conn = f'postgresql://{user}:{password}@{host}:{port}/{db}'
+    engine = create_engine(url_conn)
+
+    # Crear tabla si no existe
+    with engine.begin() as conn:
+        conn.execute(text(f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            id TEXT PRIMARY KEY,
+            payload JSONB,
+            ingested_at_utc TIMESTAMP,
+            extract_window_start_utc TIMESTAMP,
+            extract_window_end_utc TIMESTAMP,
+            page_number INT,
+            page_size INT,
+            request_payload TEXT
+        )
+        """))
+
+    # Insertar con upsert
+    with engine.begin() as conn:
+        for rec in records:
+            conn.execute(text(f"""
+            INSERT INTO {table_name} (
+                id, payload, ingested_at_utc,
+                extract_window_start_utc, extract_window_end_utc,
+                page_number, page_size, request_payload
+            )
+            VALUES (
+                :id, :payload, :ingested_at_utc,
+                :extract_window_start_utc, :extract_window_end_utc,
+                :page_number, :page_size, :request_payload
+            )
+            ON CONFLICT (id) DO UPDATE SET
+                payload = EXCLUDED.payload,
+                ingested_at_utc = EXCLUDED.ingested_at_utc,
+                extract_window_start_utc = EXCLUDED.extract_window_start_utc,
+                extract_window_end_utc = EXCLUDED.extract_window_end_utc,
+                page_number = EXCLUDED.page_number,
+                page_size = EXCLUDED.page_size,
+                request_payload = EXCLUDED.request_payload
+            """), {
+                "id": rec.get("Id"),
+                "payload": json.dumps(rec),
+                "ingested_at_utc": datetime.utcnow(),
+                "extract_window_start_utc": chunk_start,
+                "extract_window_end_utc": chunk_end,
+                "page_number": page_number,
+                "page_size": page_size,
+                "request_payload": query
+            })
+
+
+@data_exporter
+def export_data_to_postgres(data, *args, **kwargs):
+    """
+    Data exporter:
+    - Recibe la salida del data_loader
+    - Inserta en Postgres cada chunk con sus metadatos
+    """
+    resultados = data["resultados"]
+
+    for i, chunk in enumerate(resultados, 1):
+        records = chunk["records"]
+        if not records:
+            continue
+
+        _save_raw_to_postgres(
+            records=records,
+            table_name=f"qb_{chunk['entidad'].lower()}s",
+            chunk_start=chunk["chunk_start"],
+            chunk_end=chunk["chunk_end"],
+            query=chunk["query"],
+            page_number=1,
+            page_size=len(records)
+        )
+        print(f"✅ Chunk {i} ({chunk['entidad']}) guardado en Postgres con {len(records)} filas")

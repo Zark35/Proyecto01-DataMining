@@ -1,0 +1,78 @@
+import requests
+from mage_ai.data_preparation.shared.secrets import get_secret_value
+from mage_ai.data_preparation.decorators import data_loader
+from datetime import datetime, timedelta
+
+
+def refresh_access_token():
+    client_id = get_secret_value('qb_client_id')
+    client_secret = get_secret_value('qb_client_secret')
+    refresh_token = get_secret_value('qb_refresh_token')
+
+    url = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"
+    headers = {"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"}
+    auth = (client_id, client_secret)
+    data = {"grant_type": "refresh_token", "refresh_token": refresh_token}
+
+    resp = requests.post(url, headers=headers, data=data, auth=auth, timeout=30)
+    resp.raise_for_status()
+    return resp.json()['access_token']
+
+
+def _fetch_qb_data(realm_id, access_token, query, base_url, minor_version):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Accept': 'application/json',
+        'Content-Type': 'text/plain'
+    }
+    params = {"query": query, "minorversion": minor_version}
+    url = f"{base_url.rstrip('/')}/v3/company/{realm_id}/query"
+
+    resp = requests.get(url, headers=headers, params=params, timeout=60)
+    resp.raise_for_status()
+    return resp.json()
+
+
+@data_loader
+def load_data_from_api(*args, **kwargs):
+    """
+    Data Loader para QuickBooks Invoices
+    """
+    fecha_inicio = kwargs.get('fecha_inicio', '2025-08-01')
+    fecha_fin = kwargs.get('fecha_fin', '2025-08-07')
+
+    realm_id = get_secret_value('qb_realm_id')
+    access_token = refresh_access_token()
+    base_url = 'https://sandbox-quickbooks.api.intuit.com'
+    minor_version = 75
+
+    start = datetime.fromisoformat(fecha_inicio)
+    end = datetime.fromisoformat(fecha_fin)
+
+    all_records = []
+
+    chunk_start = start
+    while chunk_start <= end:
+        chunk_end = min(chunk_start + timedelta(days=1), end)
+        query = f"select * from Invoice where TxnDate >= '{chunk_start.date()}' and TxnDate <= '{chunk_end.date()}'"
+
+        data = _fetch_qb_data(realm_id, access_token, query, base_url, minor_version)
+        invoices = data.get("QueryResponse", {}).get("Invoice", [])
+
+        print(f"📅 Rango {chunk_start.date()} → {chunk_end.date()} | {len(invoices)} registros extraídos")
+
+        for rec in invoices:
+            all_records.append({
+                "id": rec.get("Id"),
+                "payload": rec,
+                "ingested_at_utc": datetime.utcnow().isoformat(),
+                "extract_window_start_utc": chunk_start.isoformat(),
+                "extract_window_end_utc": chunk_end.isoformat(),
+                "page_number": 1,
+                "page_size": len(invoices),
+                "request_payload": query
+            })
+
+        chunk_start = chunk_end + timedelta(days=1)
+
+    return all_records

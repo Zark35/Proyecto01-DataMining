@@ -1,0 +1,183 @@
+import requests
+import pandas as pd
+import json
+import datetime
+import time
+import random
+from sqlalchemy import create_engine
+from mage_ai.data_preparation.shared.secrets import get_secret_value
+
+if 'data_loader' not in globals():
+    from mage_ai.data_preparation.decorators import data_loader
+if 'test' not in globals():
+    from mage_ai.data_preparation.decorators import test
+
+
+def refresh_access_token():
+    client_id = get_secret_value('qb_client_id')
+    client_secret = get_secret_value('qb_client_secret')
+    refresh_token = get_secret_value('qb_refresh_token')
+
+    url = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"
+    headers = {"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"}
+    auth = (client_id, client_secret)
+
+    data = {"grant_type": "refresh_token", "refresh_token": refresh_token}
+
+    response = requests.post(url, headers=headers, data=data, auth=auth)
+    response.raise_for_status()
+    tokens = response.json()
+    return tokens['access_token']
+
+
+""" def _fetch_qb_data(realm_id, access_token, query, base_url, minor_version):
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Accept': 'application/json',
+        'Content-Type': 'text/plain'
+    }
+    params = {"query": query, "minorversion": minor_version}
+    url = f"{base_url.rstrip('/')}/v3/company/{realm_id}/query"
+    response = requests.get(url, headers=headers, params=params, timeout=60)
+    response.raise_for_status()
+    return response.json()
+"""
+def _fetch_qb_data(realm_id, access_token, query, base_url, minor_version, page_size=1000, max_retries=5):
+    """
+    Llama a la API de QuickBooks con paginación y backoff exponencial.
+    
+    - Usa STARTPOSITION y MAXRESULTS para recorrer todas las páginas.
+    - Reintenta en caso de error con backoff exponencial.
+    - Devuelve la lista completa de registros.
+    """
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Accept': 'application/json',
+        'Content-Type': 'text/plain'
+    }
+
+    all_records = []
+    start_position = 1
+    has_more = True
+    page = 1
+
+    while has_more:
+        paged_query = f"{query} STARTPOSITION {start_position} MAXRESULTS {page_size}"
+        params = {
+            "query": paged_query,
+            "minorversion": minor_version
+        }
+        url = f"{base_url.rstrip('/')}/v3/company/{realm_id}/query"
+
+        for intento in range(max_retries):
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=60)
+                response.raise_for_status()
+                data = response.json()
+
+                # Extraer registros de la respuesta
+                records = data.get('QueryResponse', {}).get('Invoice', [])
+                all_records.extend(records)
+
+                print(f"✅ Página {page}: {len(records)} registros obtenidos (posición inicial {start_position})")
+
+                # Si recibimos menos registros que el page_size → no hay más páginas
+                has_more = len(records) == page_size
+                break
+
+            except requests.exceptions.RequestException as e:
+                espera = (2 ** intento) + random.uniform(0, 1)
+                print(f"⚠️ Error en la página {page} ({e}). Reintentando en {espera:.2f}s...")
+                time.sleep(espera)
+
+                if intento == max_retries - 1:
+                    print("❌ Falló después de múltiples intentos, abortando este tramo.")
+                    has_more = False
+                    break
+
+        # Avanzar a la siguiente página
+        start_position += page_size
+        page += 1
+
+    print(f"📊 Total de registros extraídos: {len(all_records)}")
+    return all_records
+
+
+def _save_raw_json_to_postgres(records: list, table_name: str):
+    user = get_secret_value('pg_user')
+    password = get_secret_value('pg_password')
+    host = get_secret_value('pg_host')
+    port = get_secret_value('pg_port')
+    db = get_secret_value('pg_db')
+
+    url_conn = f'postgresql://{user}:{password}@{host}:{port}/{db}'
+    engine = create_engine(url_conn)
+
+    df = pd.DataFrame([{'data': json.dumps(record)} for record in records])
+    df.to_sql(table_name, con=engine, if_exists='append', index=False)
+
+
+
+@data_loader
+def load_data_from_api(*args, **kwargs):
+    """
+    Pipeline con segmentación:
+    - Usa fecha_inicio y fecha_fin (ISO: YYYY-MM-DD).
+    - Divide en chunks diarios (puedes cambiar a semanales).
+    - Guarda los datos crudos en Postgres.
+    """
+    realm_id = get_secret_value('qb_realm_id')
+    access_token = refresh_access_token()
+    minor_version = 75
+    base_url = 'https://sandbox-quickbooks.api.intuit.com'
+
+    # Parametros recibidos
+    fecha_inicio = kwargs.get('fecha_inicio', '2025-08-01')
+    fecha_fin = kwargs.get('fecha_fin', '2025-08-07')
+
+    start_date = datetime.date.fromisoformat(fecha_inicio)
+    end_date = datetime.date.fromisoformat(fecha_fin)
+
+    results_summary = []
+
+    current_date = start_date
+    while current_date <= end_date:
+        chunk_start = current_date
+        chunk_end = min(chunk_start + datetime.timedelta(days=1), end_date)
+
+        query = f"select * from Invoice where TxnDate >= '{chunk_start}' and TxnDate <= '{chunk_end}'"
+
+        print(f"Procesando rango: {chunk_start} → {chunk_end}")
+        start_time = time.time()
+
+        try:
+            data = _fetch_qb_data(realm_id, access_token, query, base_url, minor_version)
+            records = data.get('QueryResponse', {}).get('Invoice', [])
+
+            if records:
+                _save_raw_json_to_postgres(records, 'raw_invoices')
+
+            elapsed = time.time() - start_time
+            results_summary.append({
+                "fecha_inicio": str(chunk_start),
+                "fecha_fin": str(chunk_end),
+                "filas": len(records),
+                "duracion_seg": round(elapsed, 2),
+            })
+
+            print(f"✅ {len(records)} filas insertadas en {elapsed:.2f} seg.")
+
+        except Exception as e:
+            print(f"❌ Error en el rango {chunk_start} → {chunk_end}: {e}")
+
+        current_date = chunk_end + datetime.timedelta(days=1)
+
+    return {"chunks": results_summary}
+
+
+@test
+def test_output(output, *args) -> None:
+    assert "chunks" in output, "El bloque no devolvió los resultados esperados"
+    print("Resumen de chunks procesados:")
+    for chunk in output["chunks"]:
+        print(chunk)

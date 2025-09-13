@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:13
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: datamining
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  pgadmin:
+    image: dpage/pgadmin4:6.15
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@datamining.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "8070:80"
+    depends_on:
+      - postgres
+
+  mage:
+    image: mageai/mageai:latest
+    container_name: mage
+    volumes:
+      - ./mage:/home/src
+      - ./secrets:/home/src/secrets  
+    ports:
+      - "6789:6789"
+    environment:
+      MAGE_DATA_DIR: /home/src
+      DEV_MODE: "1"
+      PYTHONPATH: "/home/src"
+      ENABLE_NEW_RELIC: "0"
+    command: /app/run_app.sh mage start default
+    depends_on:
+      - postgres
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+
+volumes:
+  postgres_data:

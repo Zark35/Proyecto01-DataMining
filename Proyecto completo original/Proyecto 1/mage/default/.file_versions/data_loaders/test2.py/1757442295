@@ -1,0 +1,132 @@
+import requests
+import pandas as pd
+import json
+from sqlalchemy import create_engine
+from mage_ai.data_preparation.shared.secrets import get_secret_value
+
+if 'data_loader' not in globals():
+    from mage_ai.data_preparation.decorators import data_loader
+if 'test' not in globals():
+    from mage_ai.data_preparation.decorators import test
+
+
+def refresh_access_token():
+    """
+    Refresca el access_token de QuickBooks usando el refresh_token
+    """
+    client_id = get_secret_value('qb_client_id')
+    client_secret = get_secret_value('qb_client_secret')
+    refresh_token = get_secret_value('qb_refresh_token')
+
+    url = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+
+    auth = (client_id, client_secret)  # Basic Auth con client_id y secret
+
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token
+    }
+
+    try:
+        response = requests.post(url, headers=headers, data=data, auth=auth)
+        response.raise_for_status()
+        tokens = response.json()
+
+        # El nuevo access token
+        new_access_token = tokens['access_token']
+
+        print("✅ Access token refrescado correctamente")
+        return new_access_token
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error al refrescar el access token: {e}")
+        return None
+
+def _fetch_qb_data(realm_id, access_token, query, base_url, minor_version):
+    # Llama a la API de QuickBooks y devuelve el JSON con los resultados
+    if not base_url or not minor_version:
+        raise ValueError("Se requiere una URL base y el minor version")
+
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Accept': 'application/json',
+        'Content-Type': 'text/plain'
+    }
+
+    params = {
+        'query': query,
+        'minorversion': minor_version
+    }
+
+    url = f"{base_url.rstrip('/')}/v3/company/{realm_id}/query"
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        print('Datos recibidos correctamente de QuickBooks')
+        return data
+    except requests.exceptions.RequestException as e:
+        print(f'Error en la API de QuickBooks: {e}')
+        return None
+
+def _save_raw_json_to_postgres(records: list, table_name: str):
+    """
+    Guarda una lista de dicts completos como JSON en Postgres (columna única 'data').
+    """
+    user = get_secret_value('pg_user')
+    password = get_secret_value('pg_password')
+    host = get_secret_value('pg_host')
+    port = get_secret_value('pg_port')
+    db = get_secret_value('pg_db')
+
+    url_conn = f'postgresql://{user}:{password}@{host}:{port}/{db}'
+    engine = create_engine(url_conn)
+
+    # Convertimos lista de dicts en DataFrame con una sola columna
+    df = pd.DataFrame([{'data': json.dumps(record)} for record in records])
+
+    df.to_sql(table_name, con=engine, if_exists='replace', index=False)
+    print(f"✅ Datos guardados en la tabla {table_name} (columna única 'data')")
+
+
+
+@data_loader
+def load_data_from_api(*args, **kwargs):
+    """
+    Pipeline de extracción y carga:
+    1. Extrae datos de QuickBooks
+    2. Convierte a DataFrame
+    3. Normaliza JSONs anidados
+    4. Guarda en Postgres
+    """
+    realm_id = get_secret_value('qb_realm_id')
+    access_token = refresh_access_token()
+    minor_version = 75
+    query = 'select * from Invoice'
+    base_url = 'https://sandbox-quickbooks.api.intuit.com'
+
+    data = _fetch_qb_data(realm_id, access_token, query, base_url, minor_version)
+
+    iif data and 'QueryResponse' in data and 'Invoice' in data['QueryResponse']:
+    invoices = data['QueryResponse']['Invoice']
+
+    # Guardar crudo como JSON
+    _save_raw_json_to_postgres(invoices, 'raw_invoices')
+
+    return {"records_extracted": len(invoices)}
+
+
+
+@test
+def test_output(output, *args) -> None:
+    """
+    Verifica que el pipeline extraiga al menos un registro
+    """
+    assert "records_extracted" in output, "El bloque no devolvió la métrica esperada"
+    print(f"{output['records_extracted']} registros extraídos y guardados en Postgres")

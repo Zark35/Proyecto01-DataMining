@@ -1,0 +1,141 @@
+import requests
+import json
+import time
+import random
+from sqlalchemy import create_engine, text
+from mage_ai.data_preparation.shared.secrets import get_secret_value
+from datetime import datetime, timedelta
+
+if 'data_loader' not in globals():
+    from mage_ai.data_preparation.decorators import data_loader
+if 'test' not in globals():
+    from mage_ai.data_preparation.decorators import test
+
+def refresh_access_token():
+    client_id = get_secret_value('qb_client_id')
+    client_secret = get_secret_value('qb_client_secret')
+    refresh_token = get_secret_value('qb_refresh_token')
+
+    url = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"
+    headers = {"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"}
+    auth = (client_id, client_secret)
+    data = {"grant_type": "refresh_token", "refresh_token": refresh_token}
+
+    resp = requests.post(url, headers=headers, data=data, auth=auth, timeout=30)
+    resp.raise_for_status()
+    return resp.json()['access_token']
+
+
+
+
+
+def _save_raw_to_postgres(records, table_name, chunk_start, chunk_end, query, page_number, page_size):
+    """
+    Guarda registros en tabla raw con upsert e incluye metadatos.
+    """
+    user = get_secret_value('pg_user')
+    password = get_secret_value('pg_password')
+    host = get_secret_value('pg_host')
+    port = get_secret_value('pg_port')
+    db = get_secret_value('pg_db')
+
+    url_conn = f'postgresql://{user}:{password}@{host}:{port}/{db}'
+    engine = create_engine(url_conn)
+
+    # Crear tabla si no existe
+    with engine.begin() as conn:
+        conn.execute(text(f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            id TEXT PRIMARY KEY,
+            payload JSONB,
+            ingested_at_utc TIMESTAMP,
+            extract_window_start_utc TIMESTAMP,
+            extract_window_end_utc TIMESTAMP,
+            page_number INT,
+            page_size INT,
+            request_payload TEXT
+        )
+        """))
+
+    # Insertar con upsert
+    with engine.begin() as conn:
+        for rec in records:
+            conn.execute(text(f"""
+            INSERT INTO {table_name} (
+                id, payload, ingested_at_utc,
+                extract_window_start_utc, extract_window_end_utc,
+                page_number, page_size, request_payload
+            )
+            VALUES (
+                :id, :payload, :ingested_at_utc,
+                :extract_window_start_utc, :extract_window_end_utc,
+                :page_number, :page_size, :request_payload
+            )
+            ON CONFLICT (id) DO UPDATE SET
+                payload = EXCLUDED.payload,
+                ingested_at_utc = EXCLUDED.ingested_at_utc,
+                extract_window_start_utc = EXCLUDED.extract_window_start_utc,
+                extract_window_end_utc = EXCLUDED.extract_window_end_utc,
+                page_number = EXCLUDED.page_number,
+                page_size = EXCLUDED.page_size,
+                request_payload = EXCLUDED.request_payload
+            """), {
+                "id": rec.get("Id"),
+                "payload": json.dumps(rec),
+                "ingested_at_utc": datetime.utcnow(),
+                "extract_window_start_utc": chunk_start,
+                "extract_window_end_utc": chunk_end,
+                "page_number": page_number,
+                "page_size": page_size,
+                "request_payload": query
+            })
+
+
+@data_loader
+def load_data_from_api(*args, **kwargs):
+    """
+    Pipeline completo para Invoices:
+    - Refresca token
+    - Extrae con paginación y backoff
+    - Guarda capa raw con metadatos y upsert
+    """
+    fecha_inicio = kwargs.get('fecha_inicio', '2025-08-01')
+    fecha_fin = kwargs.get('fecha_fin', '2025-08-07')
+
+    realm_id = get_secret_value('qb_realm_id')
+    access_token = refresh_access_token()
+    base_url = 'https://sandbox-quickbooks.api.intuit.com'
+    minor_version = 75
+
+    start = datetime.fromisoformat(fecha_inicio)
+    end = datetime.fromisoformat(fecha_fin)
+
+    resumen = []
+
+    chunk_start = start
+    while chunk_start <= end:
+        chunk_end = min(chunk_start + timedelta(days=1), end)
+        query = f"select * from Invoice where TxnDate >= '{chunk_start.date()}' and TxnDate <= '{chunk_end.date()}'"
+
+        start_time = time.time()
+        records = _fetch_qb_data(realm_id, access_token, query, base_url, minor_version)
+        duration = round(time.time() - start_time, 2)
+
+        _save_raw_to_postgres(records, "qb_invoices",
+                              chunk_start, chunk_end, query,
+                              page_number=1, page_size=len(records))
+
+        resumen.append({
+            "fecha_inicio": chunk_start.isoformat(),
+            "fecha_fin": chunk_end.isoformat(),
+            "filas": len(records),
+            "duracion_seg": duration
+        })
+
+        chunk_start = chunk_end + timedelta(days=1)
+
+    print("📊 Resumen:")
+    for r in resumen:
+        print(r)
+
+    return resumen
